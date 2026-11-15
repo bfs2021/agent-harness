@@ -24,36 +24,32 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gemini_common import (  # noqa: E402
+    ASPECTS,
+    MAX_CLIP_SECONDS,
     MAX_EXTENDED_SECONDS,
     MAX_UNPINNED_SECONDS,
+    MIN_CLIP_SECONDS,
     DEFAULT_TIMEOUT_S,
     MODELS,
-    VIDEO_RATES_USD,
-    approval_token,
     die,
     log_run,
+    price,
     read_text_arg,
     render_clip,
     require_approval,
+    slug,
     usage_summary,
     positive_timeout,
 )
 
 RESOLUTIONS = ("360p", "720p", "1080p", "4k")
-ASPECTS = ("16:9", "9:16")
 TASKS = ("text_to_video", "image_to_video", "reference_to_video", "edit", "extend")
-
-
-def slug(text: str, n: int = 40) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return s[:n].rstrip("-") or "video"
 
 
 def default_out(prompt: str) -> Path:
@@ -69,7 +65,8 @@ def main() -> int:
     ap.add_argument("--aspect", choices=ASPECTS, default=None, help="16:9 (default) or 9:16")
     ap.add_argument("--resolution", choices=RESOLUTIONS, default=None, help="default 720p")
     ap.add_argument("--draft", action="store_true", help="shorthand for --resolution 360p")
-    ap.add_argument("--duration", type=int, choices=range(3, 11), metavar="SECONDS",
+    ap.add_argument("--duration", type=int, choices=range(MIN_CLIP_SECONDS, MAX_CLIP_SECONDS + 1),
+                    metavar="SECONDS",
                     help="clip length, 3-10 (default: 10, or a length the prompt names, up to 15). Billed per second.")
     ap.add_argument("--image", action="append", help="reference image (repeatable, up to a handful)")
     ap.add_argument("--first-frame", help="image to start the video on")
@@ -132,10 +129,9 @@ def main() -> int:
         billable = args.output_seconds or ceiling
     else:
         billable = args.duration or MAX_UNPINNED_SECONDS
-    estimate = billable * VIDEO_RATES_USD[resolution]
-    token = approval_token(billable, resolution)
+    priced = price(billable, resolution)
     if args.approve is None:
-        print(f"this render bills {billable}s at {resolution}, about ${estimate:.2f}")
+        print(f"this render bills {priced.text}")
         if continuing and not args.output_seconds:
             if editing:
                 print(f"  an edit returns one clip, so {MAX_UNPINNED_SECONDS}s is the worst case.")
@@ -149,9 +145,9 @@ def main() -> int:
         elif not continuing and not args.duration:
             print(f"  length is unset, so the model chooses it; {MAX_UNPINNED_SECONDS}s is the worst case.")
             print("  pass --duration 3..10 to pin it and approve a smaller number.")
-        print(f"approve with: --approve {token}")
+        print(f"approve with: --approve {priced.token}")
         return 2
-    require_approval(args.approve, token)
+    require_approval(args.approve, priced.token)
 
     announce = None
     if not args.json:
@@ -177,7 +173,7 @@ def main() -> int:
         "duration": f"{args.duration}s" if args.duration else None,
         "billed_seconds": billable,
         "priced_as": ("one edited clip" if editing else "whole output (extend)") if continuing else "this clip",
-        "estimate_usd": round(estimate, 2),
+        "estimate_usd": round(priced.usd, 2),
         "previous_id": args.previous_id,
         "seconds": elapsed,
         "usage": usage_summary(interaction),

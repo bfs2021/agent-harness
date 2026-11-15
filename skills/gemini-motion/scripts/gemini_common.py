@@ -23,6 +23,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple, NoReturn
 
 MODELS = {
     "video": "gemini-omni-1.2-flash",
@@ -54,6 +55,9 @@ MIN_ATTEMPT_S = 20
 """Below this there is no point starting another model: generation of a real
 brief has not been observed finishing faster, so a shorter slice just burns
 the remaining budget and reports the same failure later."""
+
+MIN_CLIP_SECONDS = 3
+"""The shortest clip one Omni call renders."""
 
 MAX_CLIP_SECONDS = 10
 """The longest clip every Omni mode accepts, and so the cap on a pinned length.
@@ -88,12 +92,15 @@ than in each script so there is one copy to correct. They do move: check
 https://aistudio.google.com/docs/pricing before quoting a figure that matters.
 """
 
+ASPECTS = ("16:9", "9:16")
+"""Aspect ratios Omni renders; the first is its default."""
+
 
 LOG_DIR_NAME = ".gemini-motion"
 LOG_FILE_NAME = "runs.jsonl"
 
 
-def die(msg: str, code: int = 1) -> None:
+def die(msg: str, code: int = 1) -> NoReturn:
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(code)
 
@@ -228,8 +235,12 @@ just gets inlined rather than shown to the model.
 """
 
 
-def image_block(path: str | Path) -> dict:
-    """Inline image content block (base64). Fine for images up to a few MB."""
+def check_image(path: str | Path) -> tuple[Path, str]:
+    """Refuse an image the model would reject, without reading it; return (path, mime).
+
+    Every check image_block makes before encoding lives here, so a plan can be
+    validated against the same rules at no more than a stat() per image.
+    """
     p = Path(path)
     if not p.is_file():
         die(f"image not found: {p}")
@@ -245,6 +256,12 @@ def image_block(path: str | Path) -> dict:
         # API as "Unable to process input image" with nothing pointing at the
         # cause. A failed download leaves exactly this.
         die(f"image file is empty: {p}")
+    return p, mime
+
+
+def image_block(path: str | Path) -> dict:
+    """Inline image content block (base64). Fine for images up to a few MB."""
+    p, mime = check_image(path)
     data = base64.b64encode(p.read_bytes()).decode("ascii")
     return {"type": "image", "data": data, "mime_type": mime}
 
@@ -286,7 +303,6 @@ def read_text_arg(value: str | None, file_arg: str | None, what: str) -> str:
     if value:
         return value.strip()
     die(f"provide the {what} as an argument or with --{what}-file")
-    return ""  # unreachable
 
 
 _FENCE_RE = re.compile(r"```([a-zA-Z0-9_+-]*)[ \t]*\n(.*?)```", re.DOTALL)
@@ -309,23 +325,31 @@ def extract_code(text: str, prefer: tuple[str, ...] = ()) -> tuple[str, str]:
     return body.strip("\n"), lang.lower()
 
 
+def ignored_dir(path: Path) -> Path:
+    """`path`, created if absent, with a .gitignore that keeps it out of git.
+
+    The protection has to arrive with the directory rather than after it, so
+    every directory this skill fills with local state -- the run log, a
+    storyboard's clips -- is created through here.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    ignore = path / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text("# written by the gemini-motion skill: this is local run state\n*\n",
+                          encoding="utf-8")
+    return path
+
+
 def log_dir() -> Path:
     """./.gemini-motion/, created if absent, ignoring itself.
 
     The directory holds whole prompts and the raw model reply. Keeping it out
     of git was documented in references/setup.md and nothing enforced it, which
-    is a line in a file nobody reads at the moment it matters. The protection
-    has to arrive with the directory rather than after it, so every writer goes
-    through here -- the run log is not the only one, and the other writer ran
-    first.
+    is a line in a file nobody reads at the moment it matters. So every writer
+    goes through here -- the run log is not the only one, and the other writer
+    ran first.
     """
-    d = Path.cwd() / LOG_DIR_NAME
-    d.mkdir(exist_ok=True)
-    ignore = d / ".gitignore"
-    if not ignore.exists():
-        ignore.write_text("# written by the gemini-motion skill: this is local run state\n*\n",
-                          encoding="utf-8")
-    return d
+    return ignored_dir(Path.cwd() / LOG_DIR_NAME)
 
 
 def log_run(kind: str, **fields) -> Path:
@@ -346,6 +370,12 @@ def save_b64(data_b64: str, out: str | Path) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(base64.b64decode(data_b64))
     return p
+
+
+def slug(text: str, n: int = 40) -> str:
+    """A filename stem from free text: lowercase, hyphens, at most n chars, never empty."""
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return s[:n].rstrip("-") or "video"
 
 
 def usage_summary(interaction) -> dict | None:
@@ -386,6 +416,24 @@ def require_approval(given: str, token: str) -> None:
             "resolution could still multiply")
     die(f"this render bills {token} but --approve says {given!r}; "
         "re-check the settings and confirm again")
+
+
+class Price(NamedTuple):
+    """One render's price in the three forms every gate uses.
+
+    `text` is what the user reads ("6s at 360p, about $0.18"), `token` is what
+    they confirm back (see approval_token), `usd` is what the log keeps. Both
+    scripts print from here, so the figure shown, the token demanded and the
+    estimate logged cannot drift apart.
+    """
+    text: str
+    token: str
+    usd: float
+
+
+def price(seconds: int, resolution: str) -> Price:
+    usd = seconds * VIDEO_RATES_USD[resolution]
+    return Price(f"{seconds}s at {resolution}, about ${usd:.2f}", approval_token(seconds, resolution), usd)
 
 
 BIG_RESOLUTIONS = ("1080p", "4k")  # payloads > 4 MB need URI delivery
