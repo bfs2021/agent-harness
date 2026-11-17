@@ -10,9 +10,9 @@ and reviewer; Gemini does the rendering or writes the keyframes.
 
 | Path | Produces | Model | Cost | Reach for it when |
 |---|---|---|---|---|
-| **A. Rendered video** | .mp4, 3–10 s (one take extends to 30 s), native audio | `gemini-omni-1.2-flash` | **paid only**, ~$0.023/s draft, ~$0.07/s at 720p | photoreal or cinematic, live-action feel, sound, "a video of …", social clips, something a browser can't draw |
+| **A. Rendered video** | .mp4, 3–10 s (one uncut take: 15 s unpinned, 30 s by extends), native audio | `gemini-omni-1.2-flash` | **paid only**, ~$0.023/s draft, ~$0.07/s at 720p | photoreal or cinematic, live-action feel, sound, "a video of …", social clips, something a browser can't draw |
 | **B. Code animation** | one self-contained .html / .svg / Lottie .json | `gemini-3.8-flash` | free tier | UI motion, logos, loaders, hero backgrounds, diagrams that animate, anything that ships inside a web page or app |
-| **C. Storyboard** | one stitched .mp4 from several 3–10 s shots | `gemini-omni-1.2-flash` | **paid only**, A's rates, priced for the whole plan before anything renders | anything over 10 s, several scenes, explainers, trailers, promos, B-roll |
+| **C. Storyboard** | one stitched .mp4 from several 3–10 s shots | `gemini-omni-1.2-flash` | **paid only**, A's rates, priced for the whole plan before anything renders | anything over 10 s unless it is one uncut take, several scenes, explainers, trailers, promos, B-roll |
 | (all) **Assets / keyframes** | .png | `gemini-nano-banana-2.1` | cents | a first/last frame for a video, a sprite or illustration for an animation |
 
 If the request fits both ("an animated logo for our launch video"), ask one
@@ -78,8 +78,14 @@ recipe and limits there are what separate a usable clip from a generic one.
    normal; tell the user the running spend.
 5. **Final.** Same prompt at `--resolution 720p` (or 1080p/4k if they need
    it; both are upscales). More than 10 s → path C, a storyboard of separate
-   shots. Extend with `--previous-id` + "Extend this video: …" only for one
-   continuous take that cannot be cut, and only up to 30 s.
+   shots. One continuous take that cannot be cut has two routes, and no
+   other case does. Up to 15 s, from text or references only (first/last-frame
+   clips stop at 10 s): leave `--duration` off and name the length in the
+   prompt. The length is a request, not a pin, so the clip can come back at
+   the 10 s default, and the gate quotes the 15 s worst case
+   (`15s@<resolution>`); say both to the user before they approve. Over 15 s,
+   or any keyframed take over 10 s: extend with `--previous-id` + "Extend
+   this video: …", up to 30 s.
 
    **An extend is priced by the whole clip, not the part added.** The rate is
    per second of output and an extend returns the finished video, so a second
@@ -153,11 +159,12 @@ every turn.
    ```
 3. **Render** with the printed command, in the background: it takes minutes.
    Only shots that are missing or changed are billed. An untouched shot is
-   never rendered again, wherever it moves in the plan. After an interrupted
-   run the old token is refused, because the price now covers only the shots
-   still missing: run `check` again and get a yes for that smaller figure.
-   A shot that rendered but was not saved shows as "billed, not saved", and
-   `render` fetches it free; when nothing else is pending it needs no token.
+   never rendered again, wherever it moves in the plan. If any shot finished
+   before a run was interrupted, the old token is refused, because the price
+   now covers only the shots still missing: run `check` again and get a yes
+   for that smaller figure. A shot that rendered but was not saved shows as
+   "billed, not saved", and `render` fetches it free; when nothing else is
+   pending it needs no token.
 4. **Fix a shot** by editing it, then `check --only <id>` and render with the
    token that prints. Editing `style` changes every shot, so it re-bills the
    whole plan, and `--only` cannot avoid that: `stitch` refuses until every
@@ -187,8 +194,10 @@ every turn.
   that collects it without billing again (not after `--no-store`). Run that, not
   the render. `--timeout` bounds the render; `--delivery-timeout` bounds the
   wait and download after it.
-- **Don't promise what Omni can't do:** >15 s in one shot (and this script
-  pins at most 10; longer is path C), exact dialogue
+- **Don't promise what Omni can't do:** >15 s in one shot (`--duration` pins
+  at most 10; a prompt-named length reaches 15 from text or references, and
+  keyframed clips stop at 10; longer is path C, or an extend for one uncut
+  take), exact dialogue
   edits, voice changes, prepending/mid-clip edits, real-person likenesses,
   minors, precise frame-accurate sync. Say so early and offer the nearest thing.
 - **Keep the thread, but don't depend on it.** Chaining `--previous-id` is
