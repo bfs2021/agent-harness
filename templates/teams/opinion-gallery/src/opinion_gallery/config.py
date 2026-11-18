@@ -11,6 +11,15 @@ import yaml
 KNOWN_TOP_LEVEL = {"org", "feed", "provider", "personas", "debate", "output", "review", "guardrails", "run"}
 PROVIDER_KINDS = {"openai", "anthropic", "fake"}
 DEBATE_OUTCOMES = {"auto", "two-views"}
+# What render_disclosure fills in, named for the error a wrong template gets.
+DISCLOSURE_PLACEHOLDERS = {"display_name", "org"}
+
+
+def render_disclosure(template: str, display_name: str, org: str) -> str:
+    """The one render of output.disclosure. Delivery calls it per draft; load_contract
+    calls it once per enabled persona, so a template that would fail at publish time,
+    after the model calls have been paid for, fails at check with the same error."""
+    return template.format_map({"display_name": display_name, "org": org})
 
 
 class ConfigError(ValueError):

@@ -127,3 +127,35 @@ def test_the_shipped_contracts_leave_room_for_a_model_that_thinks():
         budgets = load_contract(STARTER.parent / name).config.provider.max_tokens
         assert set(budgets) == {"triage", "draft", "debate"}, name
         assert all(v >= floor for v in budgets.values()), f"{name}: {budgets}"
+
+
+def test_disclosure_is_refused_at_load_exactly_when_a_run_would_fail_to_render_it(tmp_path):
+    # delivery renders output.disclosure with {display_name} and {org}. load_contract
+    # runs that same render for every enabled persona with the real org name, so
+    # whatever a run would raise at publish time, after the model calls, is refused
+    # here instead, and nothing a run would render is refused.
+    def load(i, disclosure):
+        return load_contract(write_contract(tmp_path / str(i), overrides={"output": {"disclosure": disclosure}}))
+
+    with pytest.raises(ContractError, match=r"output\.disclosure names \{client\}; the placeholders are \{display_name\}, \{org\}"):
+        load(0, "AI-drafted by {display_name} on behalf of {client}.")
+    refused = (
+        "AI-drafted by {display_name",
+        "AI-drafted by {display_name:{width}}",
+        "by {org.upper()}",
+        "by {org[name]}",
+        "by {}",
+        # A declared name nested inside a format spec: a dry run with blanks passed
+        # it, because "" is a valid spec, and the real value is not.
+        "by {display_name:{org}}",
+    )
+    for i, bad in enumerate(refused, 1):
+        with pytest.raises(ContractError, match=r"output\.disclosure (names|cannot be rendered)"):
+            load(i, bad)
+    # Rendering with the real values also means a template a run renders is not refused.
+    assert load(99, "by {org[0]}").config.output.disclosure == "by {org[0]}"
+    # The values are each enabled persona's own display name and the org name, not
+    # stand-ins: the starter names are 13 to 17 characters, so [0] renders and [40] does not.
+    assert load(98, "by {display_name[0]}").config.output.disclosure == "by {display_name[0]}"
+    with pytest.raises(ContractError, match=r"cannot be rendered for personas/\w+ \(string index out of range\)"):
+        load(97, "by {display_name[40]}")
