@@ -25,6 +25,9 @@ set -euo pipefail
 # PreToolUse hook runs after the first of those. This fails the session fast, at
 # the first write, rather than preventing the first request. Early enough to stop
 # a long run landing on the wrong account; not a billing boundary.
+# routing-tripwire.sh says the same thing at session start, before the first
+# prompt, through the same library; a SessionStart hook cannot refuse anything,
+# so this hook remains the gate.
 #
 # ESCAPE HATCH: a sentinel file in the ACTIVE account's config dir, because this
 # hook inherits Claude Code's environment and a variable set inside a tool call
@@ -51,6 +54,13 @@ TARGET_LIB="$SCRIPT_DIR/llmctx-target.sh"
 [[ -f "$TARGET_LIB" ]] || exit 0
 # shellcheck source=../lib/target.sh
 source "$TARGET_LIB"
+# Routes and the account registry are read through one library, shared with the
+# SessionStart tripwire (routing-tripwire.sh), so the two cannot drift apart.
+ROUTES_LIB="$SCRIPT_DIR/llmctx-routes.sh"
+[[ -f "$ROUTES_LIB" ]] || ROUTES_LIB="$SCRIPT_DIR/../lib/routes.sh"
+[[ -f "$ROUTES_LIB" ]] || exit 0
+# shellcheck source=../lib/routes.sh
+source "$ROUTES_LIB"
 
 # Tilde expansion has one implementation, in the library. It is used here for
 # route paths and config directories as well as for a command target, so it is
@@ -63,27 +73,16 @@ canonical() { llmctx_target_canonical "$1"; }
 
 # No routes, no work. This is the common case on a machine without clients, and
 # it must cost nothing.
-routes="$(git config --global --get-all llmctx.accountRoute 2>/dev/null || true)"
-[[ -n "$routes" ]] || exit 0
+llmctx_routes_load
+[[ -n "$LLMCTX_ROUTES" ]] || exit 0
 
-active_dir="$(canonical "$(expand_home "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")")"
-home_claude="$(canonical "$HOME/.claude")"
+# The sentinel is judged again inside the library; it is read here first so a
+# suspended guard never pays for jq.
+active_dir="$(llmctx_routes_active_dir)"
 [[ -e "$active_dir/.allow-cross-account" ]] && exit 0
-
-# Which account is active: the registry maps name=dir; $HOME/.claude is always
-# `default`, registered or not.
-active_name=""
-[[ "$active_dir" == "$home_claude" ]] && active_name="default"
-if [[ -z "$active_name" ]]; then
-  while IFS= read -r entry; do
-    [[ -n "$entry" ]] || continue
-    name="${entry%%=*}"
-    dir="$(canonical "$(expand_home "${entry#*=}")")"
-    [[ "$dir" == "$active_dir" ]] && active_name="$name" && break
-  done < <(git config --global --get-all llmctx.claudeAccount 2>/dev/null || true)
-fi
-# An unregistered config dir cannot be judged; say nothing rather than guess.
-[[ -n "$active_name" ]] || exit 0
+# An unregistered config dir cannot be judged. The library says so too, but
+# said here first the payload is never parsed for it, as before the extraction.
+[[ -n "$(llmctx_routes_active_account)" ]] || exit 0
 
 input="$(cat)"
 tool="$(printf '%s' "$input" | jq -r '.tool_name // ""')"
@@ -125,40 +124,13 @@ case "$target" in
   "$active_dir" | "$active_dir"/*) exit 0 ;;
 esac
 
-# Longest matching route wins.
-route_name=""
-route_path=""
-while IFS= read -r entry; do
-  [[ -n "$entry" ]] || continue
-  name="${entry%%=*}"
-  path="$(expand_home "${entry#*=}")"
-  [[ "$path" == /* ]] || continue
-  path="$(canonical "$path")"
-  [[ -n "$path" ]] || continue
-  case "$target" in
-    "$path" | "$path"/*)
-      if [[ "${#path}" -gt "${#route_path}" ]]; then
-        route_name="$name"
-        route_path="$path"
-      fi
-      ;;
-  esac
-done <<<"$routes"
-[[ -n "$route_name" ]] || exit 0
-[[ "$route_name" != "$active_name" ]] || exit 0
-
-# A route to an account this machine has not registered is a misconfiguration
-# doctor reports; enforcing it here would deny with directions to a directory
-# that does not exist. Fail open instead.
-expected_dir=""
-if [[ "$route_name" == "default" ]]; then
-  expected_dir="$HOME/.claude"
-else
-  while IFS= read -r entry; do
-    [[ "${entry%%=*}" == "$route_name" ]] && expected_dir="$(expand_home "${entry#*=}")" && break
-  done < <(git config --global --get-all llmctx.claudeAccount 2>/dev/null || true)
-fi
-[[ -n "$expected_dir" ]] || exit 0
+# Everything that decides whether this write belongs to another account is one
+# library call, shared with routing-tripwire.sh. Silence is "cannot tell" or
+# "nothing to say"; the library's header lists which cases, and every one of
+# them fails open.
+verdict="$(llmctx_routes_judge "$target")"
+[[ -n "$verdict" ]] || exit 0
+IFS=$'\t' read -r route_name route_path expected_dir active_name _ <<<"$verdict"
 
 reason="This path is routed to the \"$route_name\" Claude account, but the session is on \"$active_name\".
 
@@ -166,15 +138,7 @@ reason="This path is routed to the \"$route_name\" Claude account, but the sessi
   route              $route_path  ->  $route_name
   CLAUDE_CONFIG_DIR  ${CLAUDE_CONFIG_DIR:-<unset>}   (expected $expected_dir)
 
-The likely cause is a shell that never loaded direnv. From a terminal OUTSIDE this session:
-  cd \"$route_path\" && direnv allow .
-  # then start a new session there: claude    and confirm with /status
-
-If a repo under that path has its own .envrc, it needs 'source_up_if_exists' as its
-first line, or it shadows the parent entirely and this keeps firing.
-
-To work here on the \"$active_name\" account deliberately, suspend the guard:
-  touch \"$active_dir/.allow-cross-account\"    # then rm it when done"
+$(llmctx_routes_fix_text "$route_path" "$active_name" "$active_dir")"
 
 jq -n --arg r "$reason" \
   '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'
